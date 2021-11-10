@@ -1,0 +1,116 @@
+#!/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10
+import sys
+import time
+import threading
+
+#TODO: 改成json string
+
+class RaftNode():
+    def __init__(self, index, peers):
+        self.lock = threading.Lock()
+        self.id = index
+        self.peers = []
+        self.timeout = (index+1)*2
+        self.last_timestamp = None
+        self.voted = False
+        self.get_vote_count = 0
+        self.state = {"state":"FOLLOWER", "leader": None, "term":1, "commitIndex: ":0, "log": [3,"hurwity"]}
+        for i in range(peers):
+            if i != index:
+                self.peers.append(i)
+
+    def sendRequestVote(self):
+        while (True):
+            if self.last_timestamp == None or time.time()-self.last_timestamp > self.timeout:
+                self.lock.acquire()
+                self.get_vote_count += 1
+                self.voted = True
+                self.state["term"] = self.state["term"] +1
+                self.state["leader"] = None
+                self.state["state"] = "CANDIDATE"
+                self.last_timestamp = time.time()
+                self.lock.release()
+                print("STATE state=\"CANDIDATE\"", flush=True)
+                print("STATE leader=null", flush=True)
+                print("STATE term=" + str(self.state["term"]), flush=True)
+                for i in self.peers:
+                    print("SEND "+str(i)+" RequestVotes "+str(self.state["term"]), flush=True)
+
+            time.sleep(0.01)
+
+    def receiveThread(self):
+        for line in sys.stdin:
+            msg_type, source, req, term = line.strip().split(" ")
+            #print(msg_type, req)
+            if int(term) >= self.state["term"]:
+                if req == "RequestVotes":
+                    if self.voted == False:
+                        self.lock.acquire()
+                        self.voted = True
+                        self.last_timestamp = time.time()
+                        self.state["state"] = "CANDIDATE"
+                        self.state["leader"] = None
+                        self.state["term"] = int(term)
+                        self.lock.release()
+                        print("SEND "+source+" RequestVotesResponse "+term, flush=True)
+                        print("STATE state=\"CANDIDATE\"", flush=True)
+                        print("STATE leader=null", flush=True)
+                        print("STATE term="+term, flush=True)
+                elif req == "RequestVotesResponse":
+                    self.lock.acquire()
+                    self.get_vote_count += 1
+                    self.lock.release()
+                    #print("mycount: ", self.get_vote_count)
+                    if self.get_vote_count > (len(self.peers)+1)/2:
+                        self.lock.acquire()
+                        self.state["leader"] = str(self.id)
+                        self.state["state"] = "LEADER"
+                        self.get_vote_count = 0
+                        self.lock.release()
+                        print("STATE state=\"LEADER\"", flush=True)
+                        print("STATE leader=\""+str(self.id)+"\"", flush=True)
+
+                elif req == "AppendEntries":
+                    if self.state["state"] == "CANDIDATE" or int(term)>self.state["term"]:
+                        print("STATE leader=null", flush=True)
+                        self.lock.acquire()
+                        self.state["leader"] = str(source)
+                        self.state["state"] = "FOLLOWER"
+                        self.state["term"] = int(term)
+                        self.lock.release()
+                        print("STATE term="+str(term))
+                        print("STATE state=\"FOLLOWER\"", flush=True)
+                        print("STATE leader=\""+source+"\"", flush=True)
+
+                    self.lock.acquire()
+                    self.last_timestamp = time.time()
+                    self.get_vote_count = 0
+                    self.voted = False
+                    self.lock.release()
+
+
+    def sendHeartBeat(self):
+        while (True):
+            if self.state["leader"] == str(self.id):
+                self.last_timestamp = time.time()
+                for i in self.peers:
+                    print("SEND "+ str(i) + " AppendEntries "+str(self.state["term"]), flush=True)
+            time.sleep(0.01)
+
+    def run(self):
+        heartbeat = threading.Thread(target=self.sendHeartBeat)
+        recv = threading.Thread(target=self.receiveThread)
+        election = threading.Thread(target=self.sendRequestVote)
+        heartbeat.start()
+        recv.start()
+        election.start()
+
+
+def main():
+    id = int(sys.argv[1])
+    total = int(sys.argv[2])
+    node = RaftNode(id, total)
+    time.sleep(1)
+    node.run()
+
+main()
