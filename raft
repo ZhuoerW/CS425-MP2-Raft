@@ -1,9 +1,7 @@
-#!/Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10
+#!/usr/local/bin/python3.10
 import sys
 import time
 import threading
-
-#TODO: 改成json string
 
 class RaftNode():
     def __init__(self, index, peers):
