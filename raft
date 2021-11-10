@@ -3,6 +3,8 @@ import sys
 import time
 import threading
 
+#TODO: 改成json string
+
 class RaftNode():
     def __init__(self, index, peers):
         self.lock = threading.Lock()
