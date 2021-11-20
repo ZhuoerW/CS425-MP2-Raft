@@ -10,7 +10,7 @@ class RaftNode():
         self.lock = threading.Lock()
         self.id = index
         self.peers = []
-        self.timeout = (index+1)*2
+        self.timeout = (index+1)*0.5
         self.last_timestamp = None
         self.voted = False
         self.get_vote_count = 0
@@ -36,32 +36,31 @@ class RaftNode():
                 for i in self.peers:
                     print("SEND "+str(i)+" RequestVotes "+str(self.state["term"]), flush=True)
 
-            time.sleep(0.01)
-
     def receiveThread(self):
         for line in sys.stdin:
             msg_type, source, req, term = line.strip().split(" ")
-            #print(msg_type, req)
+            #print(self.id, msg_type, req)
             if int(term) >= self.state["term"]:
                 if req == "RequestVotes":
-                    if self.voted == False:
-                        self.lock.acquire()
+                    self.lock.acquire()
+                    if (self.voted == False or int(term) > self.state["term"]):
                         self.voted = True
                         self.last_timestamp = time.time()
                         self.state["state"] = "CANDIDATE"
                         self.state["leader"] = None
                         self.state["term"] = int(term)
-                        self.lock.release()
                         print("SEND "+source+" RequestVotesResponse "+term, flush=True)
                         print("STATE state=\"CANDIDATE\"", flush=True)
                         print("STATE leader=null", flush=True)
                         print("STATE term="+term, flush=True)
+                    self.lock.release()
                 elif req == "RequestVotesResponse":
                     self.lock.acquire()
                     self.get_vote_count += 1
+                    cur_count = self.get_vote_count
                     self.lock.release()
                     #print("mycount: ", self.get_vote_count)
-                    if self.get_vote_count > (len(self.peers)+1)/2:
+                    if cur_count > (len(self.peers)+1)/2:
                         self.lock.acquire()
                         self.state["leader"] = str(self.id)
                         self.state["state"] = "LEADER"
@@ -71,7 +70,11 @@ class RaftNode():
                         print("STATE leader=\""+str(self.id)+"\"", flush=True)
 
                 elif req == "AppendEntries":
-                    if self.state["state"] == "CANDIDATE" or int(term)>self.state["term"]:
+                    self.lock.acquire()
+                    cur_state = self.state["state"]
+                    cur_term = self.state["term"]
+                    self.lock.release()
+                    if cur_state == "CANDIDATE" or int(term)>cur_term :
                         print("STATE leader=null", flush=True)
                         self.lock.acquire()
                         self.state["leader"] = str(source)
@@ -109,6 +112,7 @@ class RaftNode():
 def main():
     id = int(sys.argv[1])
     total = int(sys.argv[2])
+    print("---------------------------- program start",id," --------------------------")
     node = RaftNode(id, total)
     time.sleep(1)
     node.run()
