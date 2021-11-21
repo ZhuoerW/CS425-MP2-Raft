@@ -2,7 +2,7 @@
 import sys
 import time
 import threading
-
+import copy
 #TODO: 改成json string
 
 class RaftNode():
@@ -11,10 +11,13 @@ class RaftNode():
         self.id = index
         self.peers = []
         self.timeout = (index+1)*0.5
+        self.commit_timeout = 1
+        self.commit_time = time.time()
         self.last_timestamp = None
         self.voted = False
         self.get_vote_count = 0
-        self.state = {"state":"FOLLOWER", "leader": None, "term":1, "commitIndex: ":0, "log": [3,"hurwity"]}
+        self.log_response= {}
+        self.state = {"state":"FOLLOWER", "leader": None, "term":1, "commitIndex":0, "log": []}
         for i in range(peers):
             if i != index:
                 self.peers.append(i)
@@ -34,16 +37,36 @@ class RaftNode():
                 print("STATE leader=null", flush=True)
                 print("STATE term=" + str(self.state["term"]), flush=True)
                 for i in self.peers:
-                    print("SEND "+str(i)+" RequestVotes "+str(self.state["term"]), flush=True)
+                    print("SEND "+str(i)+" RequestVotes "+str(self.state["term"])+ " " + str(len(self.state["log"])), flush=True)
+
 
     def receiveThread(self):
         for line in sys.stdin:
-            msg_type, source, req, term = line.strip().split(" ")
+            # deal with log given by framework.
+            # leader: append new log to self.state["log"] and send to all peers
+            # ignore the log if I'm not leader
+            split_msg = line.strip("\n").split(" ")
+            if split_msg[0] == "LOG":
+                log = split_msg[1]
+                if self.state["state"] != "LEADER":
+                    continue
+                self.lock.acquire()
+                self.state["log"].append([self.state["term"],log])
+                print("STATE "+"log["+str(len(self.state["log"]))+"]=["+str(self.state["log"][-1][0])+",\""+self.state["log"][-1][1]+"\"]",flush=True)
+                self.log_response[log] = {str(self.id)}
+                for i in self.peers:
+                    print("SEND "+ str(i) + " AppendEntries "+str(self.state["term"])+" "+ log+" " +str(len(self.state["log"])), flush=True)
+                self.lock.release()
+                continue
+            
+        
+            msg_type, source, req, term, *other = split_msg
             #print(self.id, msg_type, req)
             if int(term) >= self.state["term"]:
                 if req == "RequestVotes":
+                    msg_type, source, req, term, len_log= split_msg
                     self.lock.acquire()
-                    if (self.voted == False or int(term) > self.state["term"]):
+                    if ((self.voted == False and int(len_log)>=len(self.state["log"]))or int(term) > self.state["term"]):
                         self.voted = True
                         self.last_timestamp = time.time()
                         self.state["state"] = "CANDIDATE"
@@ -62,14 +85,62 @@ class RaftNode():
                     #print("mycount: ", self.get_vote_count)
                     if cur_count > (len(self.peers)+1)/2:
                         self.lock.acquire()
-                        self.state["leader"] = str(self.id)
+                        self.state["leader"] = str(self.id)     
                         self.state["state"] = "LEADER"
                         self.get_vote_count = 0
-                        self.lock.release()
+                        
                         print("STATE state=\"LEADER\"", flush=True)
                         print("STATE leader=\""+str(self.id)+"\"", flush=True)
+                        self.state["commitIndex"] = len(self.state["log"])
+                        for i in self.peers:
+                            print("SEND "+ str(i) + " Heartbeat "+str(self.state["term"]), flush=True)
+                            """str_log = ""
+                            for [t,l] in self.state["log"]:
+                                str_log += str(t)+","+l+";"
+                            str_log = str_log.strip(";")
+                            if (str_log != "") :
+                                print("SEND "+ str(i) + " ForwardLog "+ str(self.state["term"]) +" "+str(self.state["commitIndex"])+" "+str_log,flush=True)"""
+                        self.lock.release()
+                
+                elif req == "ForwardLog":
+                    msg_type, source, req, term, commitId, *other= split_msg
+                    if len(other) > 0:
+                        str_log = other[0]
+                    else:
+                        str_log = ""
+                    self.lock.acquire()
+                    self.last_timestamp = time.time()
+                    logs = []
+                    if str_log != "":
+                        for pair in str_log.strip().split(";"):
+                           t,l = pair.strip().split(",")
+                           logs.append([int(t),l])
+                        i = 0
+                        while i<len(self.state["log"]) and self.state["log"][i][0] == logs[i][0] and self.state["log"][i][1] == logs[i][1]:
+                            i += 1
+                        self.state["log"] = self.state["log"][:i]
+                        while i < len(logs):
+                            self.state["log"].append(logs[i])
+                            print("STATE "+"log["+str(len(self.state["log"]))+"]=["+str(self.state["log"][-1][0])+",\""+self.state["log"][-1][1]+"\"]", flush=True)
+                            i+=1
+                        self.state["log"] = logs
+                        self.state["commitIndex"] = int(commitId)
+                        print("STATE commitIndex="+str(self.state["commitIndex"]), flush=True)
+                    else:
+                        self.state["log"] = logs
+                        self.state["commitIndex"] = int(commitId)
+                    self.lock.release()
+                
+                elif req == "RequestForwardLog":
+                    self.lock.acquire()
+                    str_log = ""
+                    for [t,l] in self.state["log"]:
+                        str_log += str(t)+","+l+";"
+                    str_log = str_log.strip(";")
+                    print("SEND "+ str(source) + " ForwardLog "+ str(self.state["term"])+" "+str(self.state["commitIndex"])+" "+str_log,flush=True)
+                    self.lock.release()
 
-                elif req == "AppendEntries":
+                elif req == "Heartbeat":
                     self.lock.acquire()
                     cur_state = self.state["state"]
                     cur_term = self.state["term"]
@@ -81,32 +152,102 @@ class RaftNode():
                         self.state["state"] = "FOLLOWER"
                         self.state["term"] = int(term)
                         self.lock.release()
-                        print("STATE term="+str(term))
+                        print("STATE term="+str(term), flush=True)
                         print("STATE state=\"FOLLOWER\"", flush=True)
                         print("STATE leader=\""+source+"\"", flush=True)
+                        print("SEND "+ str(source)+" RequestForwardLog "+ str(self.state["term"]), flush=True)
 
                     self.lock.acquire()
                     self.last_timestamp = time.time()
                     self.get_vote_count = 0
                     self.voted = False
                     self.lock.release()
+                
+                elif split_msg[2] == "AppendEntries":
+                    self.lock.acquire()
+                    self.last_timestamp = time.time()
+                    self.lock.release()
+                    msg_type, source, req, term, log, log_length = split_msg
+                    if int(term) > self.state["term"] or len(self.state["log"]) < int(log_length)-1:
+                        print("SEND "+ str(source)+" RequestForwardLog "+ str(self.state["term"]), flush=True)
+                    else:
+                        self.lock.acquire()
+                        self.state["log"].append([self.state["term"],log])
+                        print("STATE "+"log["+str(len(self.state["log"]))+"]=["+str(self.state["log"][-1][0])+",\""+self.state["log"][-1][1]+"\"]", flush=True)
+                        print("SEND " + str(source) + " AppendEntriesResponse "+str(self.state["term"])+" " + log, flush=True)
+                        self.lock.release()
+                
+                elif split_msg[2] == "AppendEntriesResponse":
+                    msg_type, source, req, term, log= split_msg
+                    self.lock.acquire()
+                    if self.log_response[log] != None:
+                        self.log_response[log].add(str(source))
+                        if len(self.log_response[log]) > (len(self.peers)+1)/2:
+                            self.state["commitIndex"] += 1
+                            self.log_response[log] = None
+                            self.commit_time = time.time()
+                            print("STATE commitIndex="+str(self.state["commitIndex"]), flush=True)
+                            for i in self.peers:
+                                print("SEND "+str(i)+" Commit "+str(term)+" "+log, flush=True)
+                            print("COMMITTED "+str(self.state["log"][self.state["commitIndex"]-1][1])+" "+str(self.state["commitIndex"]), flush=True)
+                    self.lock.release()
+                
+                elif split_msg[2] == "Commit":
+                    self.lock.acquire()
+                    self.last_timestamp = time.time()
+                    self.lock.release()
+                    if int(term) > self.state["term"]:
+                        print("SEND "+ str(source)+" RequestForwardLog "+ str(self.state["term"]), flush=True)
+                    else:
+                        msg_type, source, req, term, log = split_msg
+                        self.lock.acquire()
+                        self.state["commitIndex"] += 1
+                        print("STATE commitIndex="+str(self.state["commitIndex"]), flush=True)
+                        print("COMMITTED "+str(self.state["log"][self.state["commitIndex"]-1][1])+" "+str(self.state["commitIndex"]), flush=True)
+                        self.lock.release()
 
 
     def sendHeartBeat(self):
         while (True):
             if self.state["leader"] == str(self.id):
+                self.lock.acquire()
                 self.last_timestamp = time.time()
+                self.lock.release()
                 for i in self.peers:
-                    print("SEND "+ str(i) + " AppendEntries "+str(self.state["term"]), flush=True)
+                    print("SEND "+ str(i) + " Heartbeat "+str(self.state["term"]), flush=True)
             time.sleep(0.01)
+
+    def checkTimeout(self):
+        while True:
+            self.lock.acquire()
+            commit_time = self.commit_time
+            commitIndex = self.state["commitIndex"]
+            logs = copy.deepcopy(self.state["log"])
+            self.lock.release()
+            if commit_time - time.time() >= self.commit_timeout and commitIndex < len(logs):
+                #resend
+                curr_index = commitIndex
+                while curr_index < len(logs):
+                    t,log = logs[curr_index]
+                    for i in self.peers:
+                        print("SEND "+ str(i) + " AppendEntries "+str(self.state["term"])+" "+ log+" " +str(curr_index+1), flush=True)
+                    curr_index += 1
+                self.commit_time = time.time()
+                
+            else:
+                self.commit_time = time.time()
+            time.sleep(0.5)
+
 
     def run(self):
         heartbeat = threading.Thread(target=self.sendHeartBeat)
         recv = threading.Thread(target=self.receiveThread)
         election = threading.Thread(target=self.sendRequestVote)
+        commit_timeout = threading.Thread(target = self.checkTimeout)
         heartbeat.start()
         recv.start()
         election.start()
+        commit_timeout.start()
 
 
 def main():
